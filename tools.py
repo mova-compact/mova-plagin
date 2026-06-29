@@ -14,10 +14,12 @@ from mova_contract_plugin import (
     ExecutorBridge,
     load_package,
 )
+from mova_contract_plugin.executor_adapter import LocalExecutorAdapter
 
 logger = logging.getLogger(__name__)
 
 _SESSION: ContractSession | None = None
+_SESSION_PACKAGE_PATH: str | None = None
 
 
 def submit_step_result(args: dict, **kwargs) -> str:
@@ -89,12 +91,15 @@ def on_post_tool_call(tool_name, args=None, result=None, task_id=None, **kwargs)
 
 
 def _get_or_create_session(package_path: str) -> ContractSession:
-    global _SESSION
-    if _SESSION is not None:
+    global _SESSION, _SESSION_PACKAGE_PATH
+    if _SESSION is not None and _SESSION_PACKAGE_PATH == package_path:
         return _SESSION
 
     package = load_package(package_path)
     bridge = ExecutorBridge()
+    adapter = LocalExecutorAdapter()
+    for execution_mode in ("AI_ATOMIC", "RULE", "EXTERNAL"):
+        bridge.register_handler(execution_mode, adapter.execute)
     evidence_path = os.getenv("MOVA_EVIDENCE_PATH", "").strip()
     writer = EvidenceWriter(Path(evidence_path)) if evidence_path else EvidenceWriter(path=None)
     _SESSION = ContractSession(
@@ -102,4 +107,5 @@ def _get_or_create_session(package_path: str) -> ContractSession:
         executor_bridge=bridge,
         evidence_writer=writer,
     )
+    _SESSION_PACKAGE_PATH = package_path
     return _SESSION

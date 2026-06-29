@@ -1,4 +1,5 @@
 from .evidence import EvidenceWriter
+from .executor_adapter import LocalExecutorAdapter
 from .executor_bridge import ExecutorBridge
 from .hooks import (
     AgentHook,
@@ -17,6 +18,7 @@ __all__ = [
     "ContractSession",
     "EvidenceWriter",
     "ExecutorBridge",
+    "LocalExecutorAdapter",
     "GenericContractHook",
     "HermesContractHook",
     "build_openai_tools",
