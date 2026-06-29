@@ -25,6 +25,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+pytest-cache-files-*/
+tests/.tmp_test_packages/
 
 # Type checkers
 .mypy_cache/
