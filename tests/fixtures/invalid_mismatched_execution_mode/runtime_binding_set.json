@@ -1,0 +1,9 @@
+{
+  "bindings": {
+    "extract_invoice_fields": {
+      "step_id": "extract_invoice_fields",
+      "execution_mode": "HUMAN",
+      "connector_ref": null
+    }
+  }
+}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mova-contract-plugin"
+version = "0.1.0"
+description = "Lightweight contract-controlled execution plugin for MOVA packages."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "MOVA" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

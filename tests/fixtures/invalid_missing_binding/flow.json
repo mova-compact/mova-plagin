@@ -1,0 +1,8 @@
+{
+  "steps": [
+    {
+      "step_id": "extract_invoice_fields",
+      "instruction": "Extract invoice fields from the provided document."
+    }
+  ]
+}

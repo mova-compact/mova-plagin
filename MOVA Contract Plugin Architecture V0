@@ -1,0 +1,1149 @@
+# MOVA Contract Plugin Architecture V0
+
+Status: DRAFT_FOR_IMPLEMENTATION
+Target repo: `mova-contract-plugin`
+Language: Python 3.11+
+Goal: build a lightweight vendor-neutral Python plugin that lets agent frameworks execute MOVA contract packages without giving the agent authority over business-process execution.
+
+---
+
+## 1. Purpose
+
+`mova-contract-plugin` is a lightweight Python library for contract-controlled execution.
+
+The plugin connects to an agent framework through a minimal hook, loads a MOVA contract package, validates it, controls execution order, exposes only the current permitted step, records evidence, and prevents the agent from deciding or modifying the business process.
+
+The agent is not the process owner.
+
+The contract runtime is the process owner.
+
+The agent may only execute the currently allowed step.
+
+---
+
+## 2. Non-goals
+
+This project MUST NOT implement:
+
+* HTTP API server.
+* Separate distributed runtime.
+* MOVA Agent API.
+* Deep fork of any host agent framework.
+* Business-specific logic.
+* LLM-based process planning.
+* Agent-side choice of next step.
+* Hidden fallback to arbitrary tools.
+* Runtime mutation of contract flow by the agent.
+
+The plugin is a Python library, not a platform.
+
+---
+
+## 3. Core invariants
+
+The implementation MUST enforce these invariants:
+
+1. Runtime does not classify steps.
+
+   * Runtime executes already classified steps.
+
+2. Step without classification is invalid.
+
+3. Executable step without runtime binding is invalid.
+
+4. `classification.execution_mode == binding.execution_mode`.
+
+5. `AI_ATOMIC` steps MUST NOT produce final business decisions.
+
+6. DS layer MUST remain independent from ENV layer.
+
+7. Agent MUST NOT choose the next step.
+
+8. Agent MUST NOT skip, reorder, insert, or remove steps.
+
+9. Side effects MUST go only through plugin-controlled `ExecutorBridge`.
+
+10. `MATCH`, `NO_MATCH`, `NEEDS_HUMAN`, and `DENY` are normal outcomes, not exceptions.
+
+11. Every executed, denied, blocked, or reviewed step MUST produce evidence.
+
+12. Contract package validation happens before execution starts.
+
+---
+
+## 4. Recommended package structure
+
+```text
+mova_contract_plugin/
+├── __init__.py
+├── types.py
+├── errors.py
+├── loader.py
+├── validation.py
+├── session.py
+├── resolver.py
+├── executor_bridge.py
+├── evidence.py
+├── review.py
+├── metrics.py
+├── hooks/
+│   ├── __init__.py
+│   ├── base.py
+│   ├── openai.py
+│   ├── langchain.py
+│   └── generic.py
+└── testing/
+    ├── fixtures.py
+    └── fake_agent.py
+```
+
+Tests:
+
+```text
+tests/
+├── unit/
+│   ├── test_loader.py
+│   ├── test_validation.py
+│   ├── test_session.py
+│   ├── test_executor_bridge.py
+│   ├── test_ai_atomic.py
+│   └── test_evidence.py
+├── integration/
+│   ├── test_generic_hook.py
+│   └── test_full_contract_run.py
+└── fixtures/
+    └── minimal_contract_package/
+```
+
+Docs:
+
+```text
+docs/
+├── ARCHITECTURE.md
+├── MVP_ACCEPTANCE.md
+├── CONTRACT_PACKAGE_FORMAT.md
+├── HOOK_INTEGRATION.md
+└── ROLLBACK.md
+```
+
+---
+
+## 5. Runtime model
+
+The plugin has five main components:
+
+```text
+ContractPackageLoader
+        ↓
+PackageValidator
+        ↓
+ContractSession
+        ↓
+ExecutorBridge
+        ↓
+EvidenceWriter
+```
+
+The agent framework interacts only with a hook adapter.
+
+```text
+Agent Host
+   ↓
+Host Hook Adapter
+   ↓
+ContractSession
+   ↓
+ExecutorBridge
+   ↓
+Local Executor / Connectors
+```
+
+The contract session owns execution state.
+
+The agent only receives the current step instruction and submits the step result.
+
+---
+
+## 6. Public library interface
+
+The minimal library interface:
+
+```python
+from mova_contract_plugin import (
+    load_package,
+    ContractSession,
+    ExecutorBridge,
+    EvidenceWriter,
+)
+```
+
+Expected usage:
+
+```python
+package = load_package("./contract_package")
+
+bridge = ExecutorBridge()
+evidence = EvidenceWriter("./evidence.jsonl")
+
+session = ContractSession(
+    package=package,
+    executor_bridge=bridge,
+    evidence_writer=evidence,
+)
+
+while not session.is_done():
+    instruction = session.current_instruction()
+    result = agent.run(instruction)
+    session.submit_result(result)
+```
+
+The agent MUST NOT receive full flow control.
+
+---
+
+## 7. Core types
+
+Implement in `types.py`.
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
+
+
+class ExecutionMode(str, Enum):
+    AI_ATOMIC = "AI_ATOMIC"
+    HUMAN = "HUMAN"
+    RULE = "RULE"
+    EXTERNAL = "EXTERNAL"
+
+
+class DecisionStatus(str, Enum):
+    MATCH = "MATCH"
+    NO_MATCH = "NO_MATCH"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
+    DENY = "DENY"
+
+
+@dataclass(frozen=True)
+class StepClassification:
+    step_id: str
+    execution_mode: ExecutionMode
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RuntimeBinding:
+    step_id: str
+    execution_mode: ExecutionMode
+    connector_ref: str | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ContractStep:
+    step_id: str
+    instruction: str
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ContractPackage:
+    manifest: dict[str, Any]
+    flow: dict[str, Any]
+    classifications: dict[str, StepClassification]
+    bindings: dict[str, RuntimeBinding]
+    steps: list[ContractStep]
+
+    def step_ids_in_order(self) -> list[str]:
+        return [step.step_id for step in self.steps]
+
+
+@dataclass(frozen=True)
+class CurrentStepInstruction:
+    step_id: str
+    execution_mode: ExecutionMode
+    instruction: str
+    input_schema: dict[str, Any] | None
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StepResult:
+    step_id: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StepOutcome:
+    step_id: str
+    status: str
+    context_update: dict[str, Any] = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    episode_id: str
+    contract_id: str | None
+    step_id: str | None
+    execution_mode: str | None
+    status: str
+    reason_code: str
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ReviewCase:
+    review_id: str
+    step_id: str
+    reason_code: str
+    summary: str
+    payload: dict[str, Any]
+```
+
+---
+
+## 8. Required errors
+
+Implement in `errors.py`.
+
+```python
+class MovaContractPluginError(Exception):
+    pass
+
+
+class PackageValidationError(MovaContractPluginError):
+    pass
+
+
+class ContractViolation(MovaContractPluginError):
+    pass
+
+
+class StepOrderViolation(ContractViolation):
+    pass
+
+
+class FinalDecisionViolation(ContractViolation):
+    pass
+
+
+class BindingViolation(PackageValidationError):
+    pass
+
+
+class ClassificationViolation(PackageValidationError):
+    pass
+```
+
+---
+
+## 9. Contract package loading
+
+Implement in `loader.py`.
+
+Required files for MVP:
+
+```text
+manifest.json
+flow.json
+classification_results.json
+runtime_binding_set.json
+```
+
+Loader responsibilities:
+
+1. Read JSON files.
+2. Build `ContractPackage`.
+3. Normalize step lookup.
+4. Call package validator.
+5. Return validated package.
+
+MVP assumptions:
+
+```text
+flow.json:
+  steps: list of steps with step_id
+
+classification_results.json:
+  results: mapping step_id -> classification object
+
+runtime_binding_set.json:
+  bindings: mapping step_id -> binding object
+```
+
+Do not silently repair malformed packages.
+
+Invalid package MUST fail fast.
+
+---
+
+## 10. Package validation
+
+Implement in `validation.py`.
+
+Validation MUST check:
+
+```python
+for each step in flow.steps:
+    step_id exists
+    step_id exists in classification_results.results
+    step_id exists in runtime_binding_set.bindings
+    classification.execution_mode exists
+    binding.execution_mode exists
+    classification.execution_mode == binding.execution_mode
+```
+
+Validation MUST also check:
+
+* duplicate step IDs are invalid;
+* empty flow is invalid;
+* executable step without binding is invalid;
+* unknown execution mode is invalid;
+* missing manifest is invalid;
+* DS validation must not require ENV fields.
+
+Acceptance criteria:
+
+* invalid missing classification test fails;
+* invalid missing binding test fails;
+* mismatched execution mode test fails;
+* valid minimal package loads.
+
+---
+
+## 11. ContractSession
+
+Implement in `session.py`.
+
+`ContractSession` owns execution state.
+
+Responsibilities:
+
+1. Keep current step index.
+2. Expose only current step instruction.
+3. Accept result only for current step.
+4. Validate result against step constraints.
+5. Prevent AI final decisions.
+6. Execute through `ExecutorBridge`.
+7. Update context.
+8. Record evidence.
+9. Advance cursor.
+10. Stop when complete.
+
+Required API:
+
+```python
+class ContractSession:
+    def is_done(self) -> bool: ...
+
+    def current_step_id(self) -> str | None: ...
+
+    def current_instruction(self) -> CurrentStepInstruction | dict: ...
+
+    def submit_result(self, result: StepResult | dict) -> StepOutcome: ...
+
+    def context(self) -> dict: ...
+```
+
+Important:
+
+The session MUST NOT expose full flow to the agent-facing hook.
+
+---
+
+## 12. Step execution rule
+
+The agent may produce a result.
+
+The plugin decides whether this result can be accepted.
+
+The plugin then calls:
+
+```python
+ExecutorBridge.execute_step(step, classification, binding, result, context)
+```
+
+Execution MUST be based on:
+
+```text
+step + classification + runtime binding + current context
+```
+
+Not only on `execution_mode`.
+
+---
+
+## 13. ExecutorBridge
+
+Implement in `executor_bridge.py`.
+
+The bridge is the only place where side effects may happen.
+
+Required API:
+
+```python
+class ExecutorBridge:
+    def register_handler(self, execution_mode: str, handler): ...
+
+    def execute_step(
+        self,
+        step,
+        classification,
+        binding,
+        result,
+        context,
+    ) -> StepOutcome: ...
+```
+
+Handlers receive:
+
+```python
+handler(step, classification, binding, result, context) -> StepOutcome | dict
+```
+
+Default behavior:
+
+* If no handler exists, store step result into context.
+* Do not perform external side effects by default.
+
+Forbidden:
+
+* accepting arbitrary agent command;
+* accepting raw tool name from agent without contract step;
+* allowing agent to call connector directly;
+* bypassing binding.
+
+---
+
+## 14. AI_ATOMIC final decision guard
+
+`AI_ATOMIC` cannot produce final business decisions.
+
+MVP implementation:
+
+1. If step has output schema, validate output against schema.
+2. If schema defines allowed output fields, reject fields outside schema.
+3. If no schema exists, reject common final-decision fields as fallback.
+
+Fallback deny list:
+
+```python
+{
+    "approved",
+    "rejected",
+    "authorized",
+    "authorize",
+    "final_decision",
+    "business_decision",
+    "payment_approved",
+    "decision"
+}
+```
+
+Important:
+
+This deny list is not the main security model.
+
+Final implementation should use output schema / allowed outcome types.
+
+---
+
+## 15. Evidence
+
+Implement in `evidence.py`.
+
+MVP evidence backend: JSONL file.
+
+Required API:
+
+```python
+class EvidenceWriter:
+    def __init__(self, path: str | Path | None = None): ...
+
+    def record(self, record: EvidenceRecord) -> None: ...
+
+    def record_step_started(...): ...
+
+    def record_step_completed(...): ...
+
+    def record_denied(...): ...
+
+    def record_review_required(...): ...
+```
+
+Every record MUST include:
+
+```text
+episode_id
+timestamp
+contract_id
+step_id
+execution_mode
+status
+reason_code
+payload
+```
+
+Evidence MUST be written for:
+
+* package loaded;
+* step started;
+* step completed;
+* step denied;
+* review required;
+* contract completed;
+* contract failed.
+
+---
+
+## 16. Review
+
+Implement in `review.py`.
+
+For MVP:
+
+* Review is a normal outcome.
+* Review does not require UI.
+* Review case may be written to JSONL or returned to caller.
+
+Required API:
+
+```python
+class ReviewQueue:
+    def enqueue(self, case: ReviewCase) -> None: ...
+    def list_pending(self) -> list[ReviewCase]: ...
+```
+
+`NEEDS_HUMAN` means:
+
+```text
+side effect blocked until external approval
+```
+
+---
+
+## 17. Hook model
+
+The plugin must support minimal host integration.
+
+Primary hook boundary:
+
+```text
+before side effect / before tool execution
+```
+
+Optional hook boundaries:
+
+```text
+agent_init
+post_execute_evidence
+review_handoff
+prompt_visibility
+```
+
+For MVP, implement generic hook only.
+
+---
+
+## 18. Generic hook protocol
+
+Implement in `hooks/base.py`.
+
+```python
+from typing import Protocol, Any
+
+
+class AgentHook(Protocol):
+    def get_tool_definitions(self) -> list[dict]:
+        ...
+
+    def handle_tool_call(self, tool_name: str, arguments: dict) -> Any:
+        ...
+
+    def get_current_prompt(self) -> str:
+        ...
+```
+
+Implement `hooks/generic.py`:
+
+```python
+class GenericContractHook:
+    def __init__(self, session: ContractSession): ...
+
+    def get_tool_definitions(self) -> list[dict]: ...
+
+    def handle_tool_call(self, tool_name: str, arguments: dict) -> dict: ...
+
+    def get_current_prompt(self) -> str: ...
+```
+
+MVP tool:
+
+```text
+submit_step_result
+```
+
+The hook MUST reject all other tool names during contract execution.
+
+---
+
+## 19. OpenAI-compatible hook
+
+Implement in `hooks/openai.py`.
+
+Required functions:
+
+```python
+def build_openai_tools(session: ContractSession) -> list[dict]: ...
+
+def handle_openai_tool_call(tool_call, session: ContractSession) -> str: ...
+```
+
+Tool name:
+
+```text
+submit_step_result
+```
+
+The OpenAI hook MUST NOT expose the full contract flow.
+
+---
+
+## 20. LangChain / LangGraph hook
+
+Implement in `hooks/langchain.py`.
+
+Keep this adapter optional.
+
+If LangChain is not installed, importing core package MUST still work.
+
+Use lazy imports.
+
+Required:
+
+```python
+def attach_to_langchain_agent(agent_executor, session: ContractSession):
+    ...
+```
+
+MVP behavior:
+
+* Add `submit_step_result`.
+* Provide current step prompt.
+* Do not require deep LangChain integration.
+
+Do not mutate agent internals beyond what is necessary for MVP.
+
+---
+
+## 21. Execution lifecycle
+
+The lifecycle:
+
+```text
+1. load_package(package_dir)
+2. validate package
+3. create ExecutorBridge
+4. create EvidenceWriter
+5. create ContractSession
+6. attach hook to host
+7. host asks for current instruction
+8. agent performs current step
+9. agent submits result
+10. session validates result
+11. session executes via bridge
+12. evidence is recorded
+13. session advances
+14. repeat until complete
+```
+
+Sequence:
+
+```text
+Agent Host
+  -> Hook.get_current_prompt()
+  -> Agent executes current instruction
+  -> Agent calls submit_step_result(result)
+  -> Hook.handle_tool_call()
+  -> ContractSession.submit_result()
+  -> ExecutorBridge.execute_step()
+  -> EvidenceWriter.record()
+  -> ContractSession.advance()
+```
+
+---
+
+## 22. MVP implementation stages
+
+### Stage 1 — Project skeleton
+
+Create:
+
+```text
+pyproject.toml
+README.md
+src/mova_contract_plugin/
+tests/
+docs/
+```
+
+Requirements:
+
+* Python 3.11+
+* pytest
+* no mandatory LangChain dependency
+* no HTTP server
+* no external runtime
+
+Acceptance:
+
+```bash
+pytest
+```
+
+passes with placeholder tests.
+
+---
+
+### Stage 2 — Core types and errors
+
+Implement:
+
+```text
+types.py
+errors.py
+```
+
+Acceptance:
+
+* types import cleanly;
+* enum values match expected names;
+* errors subclass base error.
+
+---
+
+### Stage 3 — Loader and validation
+
+Implement:
+
+```text
+loader.py
+validation.py
+```
+
+Acceptance tests:
+
+* valid package loads;
+* missing classification fails;
+* missing binding fails;
+* mismatched execution mode fails;
+* duplicate step ID fails;
+* empty flow fails.
+
+---
+
+### Stage 4 — ContractSession
+
+Implement:
+
+```text
+session.py
+```
+
+Acceptance tests:
+
+* session starts at first step;
+* current instruction exposes only current step;
+* submit result advances to next step;
+* submitting wrong step fails;
+* session completes after last step;
+* agent cannot skip step.
+
+---
+
+### Stage 5 — ExecutorBridge
+
+Implement:
+
+```text
+executor_bridge.py
+```
+
+Acceptance tests:
+
+* default handler stores result in context;
+* registered handler is called;
+* handler receives binding;
+* arbitrary tool call is not accepted;
+* side effect can only happen via bridge.
+
+---
+
+### Stage 6 — AI_ATOMIC guard
+
+Implement schema-first validation and fallback deny list.
+
+Acceptance tests:
+
+* AI_ATOMIC with `approved` fails;
+* AI_ATOMIC with `final_decision` fails;
+* RULE may emit final decision;
+* HUMAN may emit approval result;
+* valid AI_ATOMIC extraction passes.
+
+---
+
+### Stage 7 — EvidenceWriter
+
+Implement:
+
+```text
+evidence.py
+```
+
+Acceptance tests:
+
+* step completed writes JSONL;
+* denied step writes JSONL;
+* contract completed writes JSONL;
+* evidence contains timestamp and episode_id.
+
+---
+
+### Stage 8 — Generic hook
+
+Implement:
+
+```text
+hooks/base.py
+hooks/generic.py
+```
+
+Acceptance tests:
+
+* hook exposes only `submit_step_result`;
+* unknown tool call is rejected;
+* tool call delegates to session;
+* current prompt reflects current step;
+* full flow is not exposed.
+
+---
+
+### Stage 9 — OpenAI-compatible hook
+
+Implement:
+
+```text
+hooks/openai.py
+```
+
+Acceptance tests:
+
+* tool schema is generated;
+* valid tool call submits result;
+* invalid tool name rejected;
+* response is JSON string.
+
+---
+
+### Stage 10 — Optional LangChain hook
+
+Implement:
+
+```text
+hooks/langchain.py
+```
+
+Rules:
+
+* lazy import LangChain;
+* package works without LangChain installed;
+* tests may skip if LangChain unavailable.
+
+---
+
+### Stage 11 — Example contract package
+
+Create:
+
+```text
+examples/minimal_invoice_contract/
+├── manifest.json
+├── flow.json
+├── classification_results.json
+└── runtime_binding_set.json
+```
+
+Include at least:
+
+```text
+AI_ATOMIC extraction step
+HUMAN approval step
+RULE finalization step
+```
+
+Acceptance:
+
+Example runs end-to-end with fake agent.
+
+---
+
+### Stage 12 — Documentation
+
+Create:
+
+```text
+docs/ARCHITECTURE.md
+docs/MVP_ACCEPTANCE.md
+docs/HOOK_INTEGRATION.md
+docs/CONTRACT_PACKAGE_FORMAT.md
+```
+
+README must show:
+
+* install;
+* load package;
+* create session;
+* run fake agent;
+* inspect evidence.
+
+---
+
+## 23. MVP acceptance criteria
+
+MVP is complete only if:
+
+1. Package installs as Python library.
+2. Minimal contract package loads.
+3. Invalid package fails before execution.
+4. Session controls step order.
+5. Agent sees only current step.
+6. Agent cannot skip or reorder steps.
+7. AI_ATOMIC cannot emit final business decision.
+8. Execution uses binding.
+9. Evidence is written.
+10. Generic hook works.
+11. OpenAI-compatible hook works.
+12. Tests pass.
+13. No HTTP server exists.
+14. No MOVA Agent API dependency exists.
+15. No deep host-framework fork exists.
+
+---
+
+## 24. Implementation constraints
+
+Use only standard library for core package where possible.
+
+Allowed core dependencies:
+
+```text
+pytest for tests
+jsonschema optional, only if used for schema validation
+```
+
+Forbidden core dependencies:
+
+```text
+fastapi
+flask
+django
+celery
+redis
+langchain as mandatory dependency
+openai as mandatory dependency
+```
+
+Adapters may have optional extras later:
+
+```text
+mova-contract-plugin[langchain]
+mova-contract-plugin[openai]
+```
+
+---
+
+## 25. Design decision summary
+
+Final architecture:
+
+```text
+MOVA contract package
+        ↓
+loader + validator
+        ↓
+ContractSession
+        ↓
+current step instruction
+        ↓
+agent performs allowed work
+        ↓
+submit_step_result
+        ↓
+session validates
+        ↓
+ExecutorBridge executes according to binding
+        ↓
+EvidenceWriter records
+        ↓
+session advances
+```
+
+The agent is never allowed to own the business process.
+
+The contract session owns the business process.
+
+The executor bridge owns side effects.
+
+Evidence owns audit.
+
+Host adapters are thin and replaceable.
+
+---
+
+## 26. First Codex task
+
+Implement Stage 1–3 only.
+
+Do not implement hooks yet.
+
+Task:
+
+```text
+Create the Python package skeleton for mova-contract-plugin.
+
+Implement:
+- pyproject.toml
+- src/mova_contract_plugin/types.py
+- src/mova_contract_plugin/errors.py
+- src/mova_contract_plugin/loader.py
+- src/mova_contract_plugin/validation.py
+- tests/unit/test_loader.py
+- tests/fixtures/minimal_contract_package/
+
+The loader must read:
+- manifest.json
+- flow.json
+- classification_results.json
+- runtime_binding_set.json
+
+The validator must enforce:
+- every flow step has classification
+- every flow step has binding
+- classification.execution_mode == binding.execution_mode
+- duplicate step_id is invalid
+- empty flow is invalid
+
+No execution logic yet.
+No hooks yet.
+No HTTP API.
+No external runtime.
+
+Run pytest and provide implementation summary.
+```

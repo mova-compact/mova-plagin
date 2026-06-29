@@ -1,0 +1,8 @@
+{
+  "results": {
+    "extract_invoice_fields": {
+      "step_id": "extract_invoice_fields",
+      "execution_mode": "AI_ATOMIC"
+    }
+  }
+}

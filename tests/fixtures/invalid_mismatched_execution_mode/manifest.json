@@ -1,0 +1,5 @@
+{
+  "contract_id": "invalid-mismatched-execution-mode",
+  "version": "0.1.0",
+  "package_format": "mova_contract_plugin_v0"
+}

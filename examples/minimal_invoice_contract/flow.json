@@ -1,0 +1,25 @@
+{
+  "steps": [
+    {
+      "step_id": "extract_invoice_data",
+      "instruction": "Extract invoice fields from input",
+      "input_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "step_id": "approve_invoice",
+      "instruction": "Approve or reject invoice",
+      "input_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "step_id": "finalize_invoice",
+      "instruction": "Record final invoice status",
+      "input_schema": {
+        "type": "object"
+      }
+    }
+  ]
+}

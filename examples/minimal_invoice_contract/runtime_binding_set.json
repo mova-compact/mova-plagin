@@ -1,0 +1,19 @@
+{
+  "bindings": {
+    "extract_invoice_data": {
+      "step_id": "extract_invoice_data",
+      "execution_mode": "AI_ATOMIC",
+      "connector_ref": null
+    },
+    "approve_invoice": {
+      "step_id": "approve_invoice",
+      "execution_mode": "HUMAN",
+      "connector_ref": null
+    },
+    "finalize_invoice": {
+      "step_id": "finalize_invoice",
+      "execution_mode": "RULE",
+      "connector_ref": null
+    }
+  }
+}

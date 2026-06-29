@@ -1,0 +1,14 @@
+{
+  "steps": [
+    {
+      "step_id": "extract_invoice_fields",
+      "instruction": "Extract invoice fields from the provided document.",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    }
+  ]
+}
