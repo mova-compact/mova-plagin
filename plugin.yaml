@@ -1,0 +1,7 @@
+name: mova-contract-plugin
+version: 0.1.0
+description: MOVA contract execution plugin for Hermes Agent
+provides_tools:
+  - submit_step_result
+provides_hooks:
+  - post_tool_call

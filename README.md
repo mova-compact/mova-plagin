@@ -120,6 +120,26 @@ print(len(writer.records()))
   - `build_openai_tools(session)`
   - `handle_openai_tool_call(tool_call, session)`
 
+## Hermes Plugin Installation
+
+```bash
+hermes plugins install mova-compact/mova-contract-plugin --enable
+hermes plugins list
+```
+
+Required environment:
+
+```bash
+MOVA_CONTRACT_PACKAGE_PATH=/path/to/contract_package
+MOVA_EVIDENCE_PATH=/path/to/evidence.jsonl
+```
+
+Notes:
+
+- installed per active Hermes profile
+- registers the `submit_step_result` tool
+- contract execution is controlled by `ContractSession`
+
 ## Example Contract Package
 
 - `examples/minimal_invoice_contract/`
